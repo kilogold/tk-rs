@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use reqwest::Client;
@@ -129,7 +127,44 @@ impl TurnkeySigner {
     }
 
     pub fn solana_pubkey(&self) -> solana_sdk::pubkey::Pubkey {
-        solana_sdk::pubkey::Pubkey::from_str(&self.public_key).unwrap()
+        let decoded_pubkey = hex::decode(&self.public_key)
+            .expect("Failed to decode public key");
+        
+        solana_sdk::pubkey::Pubkey::try_from(decoded_pubkey.as_slice())
+            .expect("Failed to create Pubkey")
     }
 }
 
+
+// This implementation makes the TurnkeySigner compatible with the Solana SDK by conforming to the Signer trait,
+// allowing it to be used wherever a Solana SDK Signer is required.
+//
+// Note: This implementation is specific to the tokio runtime. If you need to support other async runtimes,
+// consider abstracting the runtime-specific logic to make it more generic.
+impl solana_sdk::signer::Signer for TurnkeySigner {
+    fn pubkey(&self) -> solana_sdk::pubkey::Pubkey {
+        self.solana_pubkey()
+    }
+    
+    fn try_pubkey(&self) -> Result<solana_sdk::pubkey::Pubkey, solana_sdk::signer::SignerError> {
+        Ok(self.pubkey())
+    }
+    
+    fn try_sign_message(&self, message: &[u8]) -> Result<solana_sdk::signature::Signature, solana_sdk::signer::SignerError> {
+        // The Signer trait is inherently synchronous, but the reqwest client used in sign_solana is asynchronous.
+        // To bridge this gap, we use tokio's block_in_place to block the current thread until the async operation completes.
+        // This is necessary because the Signer trait does not support async operations directly.
+        tokio::task::block_in_place(|| {
+            let handle = tokio::runtime::Handle::current();
+            handle.block_on(async {
+                self.sign_solana(message)
+                    .await
+                    .map_err(|e| solana_sdk::signer::SignerError::Custom(e.to_string()))
+            })
+        })
+    }
+    
+    fn is_interactive(&self) -> bool {
+        false
+    }
+}
